@@ -457,7 +457,7 @@ boost::filesystem::path GetDefaultDataDir()
     namespace fs = boost::filesystem;
     // Windows < Vista: C:\Documents and Settings\Username\Application Data\Bitcoin
     // Windows >= Vista: C:\Users\Username\AppData\Roaming\Bitcoin
-    // Mac: ~/Library/Application Support/Bitcoin
+    // Mac: ~/Library/Application Support/Bitcoin-2LTC
     // Unix: ~/.bitcoin
 #ifdef WIN32
     // Windows
@@ -471,7 +471,7 @@ boost::filesystem::path GetDefaultDataDir()
         pathRet = fs::path(pszHome);
 #ifdef MAC_OSX
     // Mac
-    return pathRet / "Library/Application Support/Bitcoin";
+    return pathRet / "Library/Application Support/Bitcoin-2LTC";
 #else
     // Unix
     return pathRet / ".bitcoin";
