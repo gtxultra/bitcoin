@@ -40,6 +40,19 @@ std::string CBlock::ToString() const
     return s.str();
 }
 
+std::string CBlock::ToString2() const
+{
+    std::stringstream s;
+    s << strprintf("CBlock(hash=%s, ver=0x%08x, hashPrevBlock=%s, hashMerkleRoot=%s, nTime=%u, nBits=%08x, nNonce=%u, vtx=%u)\n",
+        GetHash().ToString(),
+        nVersion,
+        hashPrevBlock.ToString(),
+        hashMerkleRoot.ToString(),
+        nTime, nBits, nNonce,
+        vtx.size());
+    return s.str();
+}
+
 int64_t GetBlockWeight(const CBlock& block)
 {
     // This implements the weight = (stripped_size * 4) + witness_size formula,
