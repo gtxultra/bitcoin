@@ -2325,14 +2325,7 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
         return true;
     }
 
-    bool fScriptChecks = true;
-    if (fCheckpointsEnabled) {
-        CBlockIndex *pindexLastCheckpoint = Checkpoints::GetLastCheckpoint(chainparams.Checkpoints());
-        if (pindexLastCheckpoint && pindexLastCheckpoint->GetAncestor(pindex->nHeight) == pindex) {
-            // This block is an ancestor of a checkpoint: disable script checks
-            fScriptChecks = false;
-        }
-    }
+    bool fScriptChecks = pindex->nHeight >= Checkpoints::GetTotalBlocksEstimate(chainparams.Checkpoints());
 
     int64_t nTime1 = GetTimeMicros(); nTimeCheck += nTime1 - nTimeStart;
     LogPrint("bench", "    - Sanity checks: %.2fms [%.2fs]\n", 0.001 * (nTime1 - nTimeStart), nTimeCheck * 0.000001);
@@ -2349,20 +2342,7 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     // Now that the whole chain is irreversibly beyond that time it is applied to all blocks except the
     // two in the chain that violate it. This prevents exploiting the issue against nodes during their
     // initial block download.
-    bool fEnforceBIP30 = (!pindex->phashBlock) || // Enforce on CreateNewBlock invocations which don't have a hash.
-                          !((pindex->nHeight==91842 && pindex->GetBlockHash() == uint256S("0x00000000000a4d0a398161ffc163c503763b1f4360639393e0e4c8e300e0caec")) ||
-                           (pindex->nHeight==91880 && pindex->GetBlockHash() == uint256S("0x00000000000743f190a18c5577a3c2d2a1f610ae9601ac046a38084ccb7cd721")));
-
-    // Once BIP34 activated it was not possible to create new duplicate coinbases and thus other than starting
-    // with the 2 existing duplicate coinbase pairs, not possible to create overwriting txs.  But by the
-    // time BIP34 activated, in each of the existing pairs the duplicate coinbase had overwritten the first
-    // before the first had been spent.  Since those coinbases are sufficiently buried its no longer possible to create further
-    // duplicate transactions descending from the known pairs either.
-    // If we're on the known chain at height greater than where BIP34 activated, we can save the db accesses needed for the BIP30 check.
-    CBlockIndex *pindexBIP34height = pindex->pprev->GetAncestor(chainparams.GetConsensus().BIP34Height);
-    //Only continue to enforce if we're below BIP34 activation height or the block hash at that height doesn't correspond.
-    fEnforceBIP30 = fEnforceBIP30 && (!pindexBIP34height || !(pindexBIP34height->GetBlockHash() == chainparams.GetConsensus().BIP34Hash));
-
+    bool fEnforceBIP30 = true;
     if (fEnforceBIP30) {
         BOOST_FOREACH(const CTransaction& tx, block.vtx) {
             const CCoins* coins = view.AccessCoins(tx.GetHash());
@@ -2372,8 +2352,8 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
         }
     }
 
-    // BIP16 didn't become active until Apr 1 2012
-    int64_t nBIP16SwitchTime = 1333238400;
+    // BIP16 didn't become active until Oct 1 2012
+    int64_t nBIP16SwitchTime = 1349049600;
     bool fStrictPayToScriptHash = (pindex->GetBlockTime() >= nBIP16SwitchTime);
 
     unsigned int flags = fStrictPayToScriptHash ? SCRIPT_VERIFY_P2SH : SCRIPT_VERIFY_NONE;
@@ -2388,19 +2368,6 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     // blocks, when 75% of the network has upgraded:
     if (block.nVersion >= 4 && IsSuperMajority(4, pindex->pprev, chainparams.GetConsensus().nMajorityEnforceBlockUpgrade, chainparams.GetConsensus())) {
         flags |= SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY;
-    }
-
-    // Start enforcing BIP68 (sequence locks) and BIP112 (CHECKSEQUENCEVERIFY) using versionbits logic.
-    int nLockTimeFlags = 0;
-    if (VersionBitsState(pindex->pprev, chainparams.GetConsensus(), Consensus::DEPLOYMENT_CSV, versionbitscache) == THRESHOLD_ACTIVE) {
-        flags |= SCRIPT_VERIFY_CHECKSEQUENCEVERIFY;
-        nLockTimeFlags |= LOCKTIME_VERIFY_SEQUENCE;
-    }
-
-    // Start enforcing WITNESS rules using versionbits logic.
-    if (IsWitnessEnabled(pindex->pprev, chainparams.GetConsensus())) {
-        flags |= SCRIPT_VERIFY_WITNESS;
-        flags |= SCRIPT_VERIFY_NULLDUMMY;
     }
 
     int64_t nTime2 = GetTimeMicros(); nTimeForks += nTime2 - nTime1;
@@ -2452,10 +2419,10 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
                 }
             }
 
-            if (!SequenceLocks(tx, nLockTimeFlags, &prevheights, *pindex)) {
-                return state.DoS(100, error("%s: contains a non-BIP68-final transaction", __func__),
-                                 REJECT_INVALID, "bad-txns-nonfinal");
-            }
+            // if (!SequenceLocks(tx, nLockTimeFlags, &prevheights, *pindex)) {
+            //     return state.DoS(100, error("%s: contains a non-BIP68-final transaction", __func__),
+            //                      REJECT_INVALID, "bad-txns-nonfinal");
+            // }
         }
 
         // GetTransactionSigOpCost counts 3 types of sigops:
@@ -2729,7 +2696,7 @@ void static UpdateTip(CBlockIndex *pindexNew, const CChainParams& chainParams) {
         }
     }
 
-    if (chainActive.Height() > 419446 || chainActive.Height() % 1000 == 0) {
+    if (chainActive.Height() % 1000 == 0) {
         LogPrintf("%s: new best=%s height=%d version=0x%08x log2_work=%.8g tx=%lu date='%s' progress=%f cache=%.1fMiB(%utx)", __func__,
             chainActive.Tip()->GetBlockHash().ToString(), chainActive.Height(), chainActive.Tip()->nVersion,
             log(chainActive.Tip()->nChainWork.getdouble()) / log(2.0), (unsigned long)chainActive.Tip()->nChainTx,
@@ -3517,6 +3484,8 @@ std::vector<unsigned char> GenerateCoinbaseCommitment(CBlock& block, const CBloc
 
 bool ContextualCheckBlockHeader(const CBlockHeader& block, CValidationState& state, const Consensus::Params& consensusParams, CBlockIndex * const pindexPrev, int64_t nAdjustedTime)
 {
+    const int nHeight = pindexPrev == NULL ? 0 : pindexPrev->nHeight + 1;
+
     // Check proof of work
     if (block.nBits != GetNextWorkRequired(pindexPrev, &block, consensusParams))
         return state.DoS(100, false, REJECT_INVALID, "bad-diffbits", false, "incorrect proof of work");
@@ -3529,11 +3498,40 @@ bool ContextualCheckBlockHeader(const CBlockHeader& block, CValidationState& sta
     if (block.GetBlockTime() > nAdjustedTime + 2 * 60 * 60)
         return state.Invalid(false, REJECT_INVALID, "time-too-new", "block timestamp too far in the future");
 
-    // Reject outdated version blocks when 95% (75% on testnet) of the network has upgraded:
-    for (int32_t version = 2; version < 5; ++version) // check for version 2, 3 and 4 upgrades
-        if (block.nVersion < version && IsSuperMajority(version, pindexPrev, consensusParams.nMajorityRejectBlockOutdated, consensusParams))
-            return state.Invalid(false, REJECT_OBSOLETE, strprintf("bad-version(0x%08x)", version - 1),
-                                 strprintf("rejected nVersion=0x%08x block", version - 1));
+    bool enforceV2 = false;
+    if (block.nVersion < 2)
+    {
+        if (consensusParams.nEnforceV2AfterHeight != -1)
+        {
+            // Mainnet 710k, Testnet 400k
+            if (nHeight >= consensusParams.nEnforceV2AfterHeight)
+                enforceV2 = true;
+        }
+        else
+        {
+            // Regtest and Unittest: use Bitcoin's supermajority rule
+            if (IsSuperMajority(2, pindexPrev, consensusParams.nMajorityRejectBlockOutdated, consensusParams))
+                enforceV2 = true;
+        }
+    }
+
+    if (enforceV2)
+    {
+        return state.Invalid(error("%s : rejected nVersion=1 block", __func__),
+                             REJECT_OBSOLETE, "bad-version");
+    }
+
+    // Reject block.nVersion=2 blocks when 95% (75% on testnet) of the network has upgraded:
+    if (block.nVersion < 3 && IsSuperMajority(3, pindexPrev, consensusParams.nMajorityRejectBlockOutdated, consensusParams))
+    {
+        return state.Invalid(error("%s : rejected nVersion=2 block", __func__),
+                             REJECT_OBSOLETE, "bad-version");
+    }
+
+    // Reject block.nVersion=3 blocks when 95% (75% on testnet) of the network has upgraded:
+    if (block.nVersion < 4 && IsSuperMajority(4, pindexPrev, consensusParams.nMajorityRejectBlockOutdated, consensusParams))
+        return state.Invalid(error("%s : rejected nVersion=3 block", __func__),
+                             REJECT_OBSOLETE, "bad-version");
 
     return true;
 }
@@ -3543,79 +3541,40 @@ bool ContextualCheckBlock(const CBlock& block, CValidationState& state, CBlockIn
     const int nHeight = pindexPrev == NULL ? 0 : pindexPrev->nHeight + 1;
     const Consensus::Params& consensusParams = Params().GetConsensus();
 
-    // Start enforcing BIP113 (Median Time Past) using versionbits logic.
-    int nLockTimeFlags = 0;
-    if (VersionBitsState(pindexPrev, consensusParams, Consensus::DEPLOYMENT_CSV, versionbitscache) == THRESHOLD_ACTIVE) {
-        nLockTimeFlags |= LOCKTIME_MEDIAN_TIME_PAST;
-    }
-
-    int64_t nLockTimeCutoff = (nLockTimeFlags & LOCKTIME_MEDIAN_TIME_PAST)
-                              ? pindexPrev->GetMedianTimePast()
-                              : block.GetBlockTime();
-
     // Check that all transactions are finalized
     BOOST_FOREACH(const CTransaction& tx, block.vtx) {
-        if (!IsFinalTx(tx, nHeight, nLockTimeCutoff)) {
+        if (!IsFinalTx(tx, nHeight, block.GetBlockTime())) {
             return state.DoS(10, false, REJECT_INVALID, "bad-txns-nonfinal", false, "non-final transaction");
         }
     }
 
+    // Litecoin: (mainnet >= 710000, testnet >= 400000, regtest uses supermajority)
     // Enforce block.nVersion=2 rule that the coinbase starts with serialized block height
     // if 750 of the last 1,000 blocks are version 2 or greater (51/100 if testnet):
-    if (block.nVersion >= 2 && IsSuperMajority(2, pindexPrev, consensusParams.nMajorityEnforceBlockUpgrade, consensusParams))
+    bool checkHeightMismatch = false;
+    if (block.nVersion >= 2)
+    {
+        if (consensusParams.nEnforceV2AfterHeight != -1)
+        {
+            // Mainnet 710k, Testnet 400k
+            if (nHeight >= consensusParams.nEnforceV2AfterHeight)
+                checkHeightMismatch = true;
+        }
+        else
+        {
+            // Regtest and Unittest: use Bitcoin's supermajority rule
+            if (IsSuperMajority(2, pindexPrev, consensusParams.nMajorityRejectBlockOutdated, consensusParams))
+                checkHeightMismatch = true;
+        }
+    }
+
+    if (checkHeightMismatch)
     {
         CScript expect = CScript() << nHeight;
         if (block.vtx[0].vin[0].scriptSig.size() < expect.size() ||
             !std::equal(expect.begin(), expect.end(), block.vtx[0].vin[0].scriptSig.begin())) {
-            return state.DoS(100, false, REJECT_INVALID, "bad-cb-height", false, "block height mismatch in coinbase");
+            return state.DoS(100, error("%s : block height mismatch in coinbase", __func__), REJECT_INVALID, "bad-cb-height");
         }
-    }
-
-    // Validation for witness commitments.
-    // * We compute the witness hash (which is the hash including witnesses) of all the block's transactions, except the
-    //   coinbase (where 0x0000....0000 is used instead).
-    // * The coinbase scriptWitness is a stack of a single 32-byte vector, containing a witness nonce (unconstrained).
-    // * We build a merkle tree with all those witness hashes as leaves (similar to the hashMerkleRoot in the block header).
-    // * There must be at least one output whose scriptPubKey is a single 36-byte push, the first 4 bytes of which are
-    //   {0xaa, 0x21, 0xa9, 0xed}, and the following 32 bytes are SHA256^2(witness root, witness nonce). In case there are
-    //   multiple, the last one is used.
-    bool fHaveWitness = false;
-    if (IsWitnessEnabled(pindexPrev, consensusParams)) {
-        int commitpos = GetWitnessCommitmentIndex(block);
-        if (commitpos != -1) {
-            bool malleated = false;
-            uint256 hashWitness = BlockWitnessMerkleRoot(block, &malleated);
-            // The malleation check is ignored; as the transaction tree itself
-            // already does not permit it, it is impossible to trigger in the
-            // witness tree.
-            if (block.vtx[0].wit.vtxinwit.size() != 1 || block.vtx[0].wit.vtxinwit[0].scriptWitness.stack.size() != 1 || block.vtx[0].wit.vtxinwit[0].scriptWitness.stack[0].size() != 32) {
-                return state.DoS(100, error("%s : invalid witness nonce size", __func__), REJECT_INVALID, "bad-witness-nonce-size", true);
-            }
-            CHash256().Write(hashWitness.begin(), 32).Write(&block.vtx[0].wit.vtxinwit[0].scriptWitness.stack[0][0], 32).Finalize(hashWitness.begin());
-            if (memcmp(hashWitness.begin(), &block.vtx[0].vout[commitpos].scriptPubKey[6], 32)) {
-                return state.DoS(100, error("%s : witness merkle commitment mismatch", __func__), REJECT_INVALID, "bad-witness-merkle-match", true);
-            }
-            fHaveWitness = true;
-        }
-    }
-
-    // No witness data is allowed in blocks that don't commit to witness data, as this would otherwise leave room for spam
-    if (!fHaveWitness) {
-        for (size_t i = 0; i < block.vtx.size(); i++) {
-            if (!block.vtx[i].wit.IsNull()) {
-                return state.DoS(100, error("%s : unexpected witness data found", __func__), REJECT_INVALID, "unexpected-witness", true);
-            }
-        }
-    }
-
-    // After the coinbase witness nonce and commitment are verified,
-    // we can check if the block weight passes (before we've checked the
-    // coinbase witness, it would be possible for the weight to be too
-    // large by filling up the coinbase witness, which doesn't change
-    // the block hash, so we couldn't mark the block as permanently
-    // failed).
-    if (GetBlockWeight(block) > MAX_BLOCK_WEIGHT) {
-        return state.DoS(100, error("ContextualCheckBlock(): weight limit failed"), REJECT_INVALID, "bad-blk-weight");
     }
 
     return true;

@@ -166,6 +166,8 @@ public:
                         //   (the tx=... number in the SetBestChain debug.log lines)
             5500.0     // * estimated number of transactions per day after checkpoint
         };
+
+        consensus.nEnforceV2AfterHeight = 710000;
     }
 };
 static CMainParams mainParams;
